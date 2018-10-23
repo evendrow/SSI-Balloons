@@ -2,27 +2,75 @@
  * This code was used on a Teensy sent to 30km.
  * The code monitors data from various sensors and records it to an SD card.
  * 
+ * Edward Vendrow, Hale Konopka
  * Team Grass
  */
 
 #include <SPI.h>
-#include "SdFat.h"
 
-#include "Adafruit_MAX31855.h"
+#include "SdFat.h" //SD card
+#include "Adafruit_MAX31855.h" //thermocouple
+#include <Adafruit_BNO055.h> //accelerometer
 
-//-------------------
-// Example creating a thermocouple instance with software SPI on any three
-// digital IO pins.
-#define MAXDO   12
+#define SAMPLERATE_DELAY_MS (1000)
+
+//--------------------------------------
+// Define data structures for sensor data transfer
+typedef struct {
+  double temp;
+} Thermo_t;
+
+typedef struct {
+  double latitude;
+  double longitude;
+} GPS_t;
+
+typedef struct {
+  double temp;
+  double pressure;
+  double alt;
+} BMP_t;
+
+typedef struct {
+  double x;
+  double y;
+  double z;
+} Accel_t;
+//--------------------------------------
+
+//--------------------------------------
+//Define global sensor variables
+ 
+Thermo_t thermo = {-1};
+GPS_t gps = {-1, -1};
+BMP_t bmp = {-1, -1, -1};
+Accel_t accel = {-1, -1, -1};
+
+//--------------------------------------
+
+//--------------------------------------
+// Create a thermocouple instance with software SPI 
+// on any three digital IO pins.
+#define MAXDO   7//12
 #define MAXCS   9//10
-#define MAXCLK  13
+#define MAXCLK  14//13
 
-// initialize the Thermocouple
+// Initialize the Thermocouple
 Adafruit_MAX31855 thermocouple(MAXCLK, MAXCS, MAXDO);
-//-------------------
+
+//--------------------------------------
+
+//--------------------------------------
+// initialize the Accelerometer
+Adafruit_BNO055 bno = Adafruit_BNO055(55);
+//--------------------------------------
+
+//--------------------------------------
+// SD Card setup
 
 // Set USE_SDIO to zero for SPI card access. 
 #define USE_SDIO 0
+
 /*
  * Set DISABLE_CHIP_SELECT to disable a second SPI device.
  * For example, with the Ethernet shield, set DISABLE_CHIP_SELECT
@@ -35,6 +83,8 @@ File myFile;
 
 const int chipSelect = 10;
 
+//--------------------------------------
+
 void setup()
 {
   //Set IO pins
@@ -44,19 +94,37 @@ void setup()
 
   // Open serial communications and wait for port to open:
   Serial.begin(9600);
-   while (!Serial) {
+  while (!Serial) {
     delay(1);
   }
 
+  //If SD fails to initialize, crash
   if (!initializeSd()) {
     return;
   }
+
+  //Try to initialize accelerometer
+  if(!bno.begin()) {
+    /* There was a problem detecting the BNO055 ... check your connections */
+    Serial.print("Ooops, no BNO055 detected ... Check your wiring or I2C ADDR!");
+  }
+  bno.setExtCrystalUse(true);
   
-//  writeLineToFile("test.txt", "This is a test line!");
+
+  //Delay to wait for sensors to load
+  delay(1000);
+
+  //  writeLineToFile("test.txt", "This is a test line!");
   readFileToConsole("test.txt");
-  
 }
 
+/*
+ * Initializes the SD Card at quarter speed
+ * Returns true if initialization succeeded
+ * 
+ * Note: only one file may be opened at one time, so you
+ * must close it before opening another file.
+ */
 bool initializeSd() {
   Serial.print("Initializing SD card...");
 
@@ -69,8 +137,13 @@ bool initializeSd() {
   return true;
 }
 
-// Note: only one file may be opened at one time, so you
-// must close it before opening another file.
+/*
+ * Writes a single given line to a file.
+ * 
+ * This method opens and closes the file on every write,
+ * which may cause slowdown but protects data in case of
+ * sudden power failure or some other issue.
+ */
 void writeLineToFile(String filename, String testLine) {
   
   myFile = sd.open(filename, FILE_WRITE);
@@ -82,7 +155,8 @@ void writeLineToFile(String filename, String testLine) {
     Serial.print("...  ");
     
     myFile.println(testLine);
-  // close the file:
+    
+    // Close the file:
     myFile.close();
     Serial.println("done writing.");
   } else {
@@ -92,8 +166,10 @@ void writeLineToFile(String filename, String testLine) {
   }
 }
 
-//This method reads the contents of a file to the Serial Monitor
-void readFileToConsole(char filename[]) {
+/*
+ * This method reads the contents of a file to the Serial Monitor
+ */
+void readFileToConsole(String filename) {
   
   myFile = sd.open(filename);
 
@@ -115,40 +191,79 @@ void readFileToConsole(char filename[]) {
   }
 }
 
-char* doubleToString(double d, int digits) {
+// May or may not work
+/*char* doubleToString(double d, int digits) {
   char str[digits];
   sprintf(str, "%f", d);
   return str;
+}*/
+
+/*
+ * Updates the thermocouple data structure with current data
+ * Sets to -1 if temperature reading fails.
+ */
+void updateThermoTemp() {
+  double c = thermocouple.readCelsius();
+  if (isnan(c)) {
+   Serial.println("Something wrong with thermocouple!");
+   thermo.temp = -1;
+  }
+
+  thermo.temp = c;
 }
 
-void loop()
-{
-  Serial.print("Internal Temp = ");
-   Serial.println(thermocouple.readInternal());
+/*
+ * Updates the accelerometer data structure with current data
+ */
+void updateAccelData() {
+  sensors_event_t event;
+  bno.getEvent(&event);
 
-   double c = thermocouple.readCelsius();
-   if (isnan(c)) {
-     Serial.println("Something wrong with thermocouple!");
-   } else {
-     Serial.print("C = "); 
-     Serial.println(c);
+  accel.x = event.orientation.x;
+  accel.y = event.orientation.y;
+  accel.z = event.orientation.z;
+}
 
-//     char* str = strcat("C = ", doubleToString(c, 4));
-//     writeLineToFile("test.txt", str);
-//     Serial.println(str);
+/*
+ * Updates sensor data 
+ */
+void updateSensorData() {
+  updateThermoTemp();
+  updateAccelData();
+}
 
-//     char s[9];
-//     sprintf(s, "%.3e", c);
-//     char *line = strcat("C = ", s);
-//     Serial.println(line);
+void loop() {
 
-      String thermoLog = "[THERMO] C: ";
-      thermoLog += c;
-      Serial.println(thermoLog);
-      writeLineToFile("thermo.txt", thermoLog);
-   }
-   //Serial.print("F = ");
-   //Serial.println(thermocouple.readFarenheit());
- 
-   delay(1000);
+  updateSensorData();
+  
+
+  String thermoLog = "[THERMO] C: ";
+  thermoLog += thermo.temp;
+  Serial.println(thermoLog);
+
+  Serial.print("X: ");
+  Serial.print(accel.x, 4);
+  Serial.print("\tY: ");
+  Serial.print(accel.y, 4);
+  Serial.print("\tZ: ");
+  Serial.println(accel.z, 4);
+
+  // Here we create a single line to input into the log file
+  String dataLog = "";
+  dataLog += millis();        dataLog += ","; // Timestamp
+  dataLog += thermo.temp;     dataLog += ","; // Thermocouple temperature
+  dataLog += accel.x;         dataLog += ","; // Accelerometer x
+  dataLog += accel.y;         dataLog += ","; // Accelerometer y
+  dataLog += accel.z;       //dataLog += ","; // Accelerometer z
+
+  Serial.println(dataLog);
+  
+  // Write the log to the log file
+  // The log file is in CSV format for easy data analysis
+//  writeLineToFile("thermo.txt", thermoLog);
+
+  // Delay the next loop by a predetermined sample rate
+  // Since data collection and logging take time, the
+  // actual sample rate will be higher
+   delay(SAMPLERATE_DELAY_MS);
 }
