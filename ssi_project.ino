@@ -11,6 +11,7 @@
 #include "SdFat.h" //SD card
 #include "Adafruit_MAX31855.h" //thermocouple
 #include <Adafruit_BNO055.h> //accelerometer
+#include <Adafruit_BMP280.h> //temp/pressure (BMP280)
 
 #define SAMPLERATE_DELAY_MS (1000)
 
@@ -61,6 +62,18 @@ Adafruit_MAX31855 thermocouple(MAXCLK, MAXCS, MAXDO);
 //--------------------------------------
 
 //--------------------------------------
+//Create temp/pressure sensor with software SPI
+#define BMP_SCK 14
+#define BMP_MISO 7
+#define BMP_MOSI 6
+#define BMP_CS 8
+
+//Adafruit_BMP280 bmp; // I2C
+//Adafruit_BMP280 bmp(BMP_CS); // hardware SPI
+Adafruit_BMP280 bmpChip(BMP_CS, BMP_MOSI, BMP_MISO,  BMP_SCK);
+//--------------------------------------
+
+//--------------------------------------
 // initialize the Accelerometer
 Adafruit_BNO055 bno = Adafruit_BNO055(55);
 //--------------------------------------
@@ -103,12 +116,19 @@ void setup()
     return;
   }
 
+  //Try to initialize BMP
+  if (!bmpChip.begin()) {  
+    Serial.println("Could not find a valid BMP280 sensor, check wiring!");
+  }
+
   //Try to initialize accelerometer
   if(!bno.begin()) {
     /* There was a problem detecting the BNO055 ... check your connections */
     Serial.print("Ooops, no BNO055 detected ... Check your wiring or I2C ADDR!");
   }
   bno.setExtCrystalUse(true);
+
+  
   
 
   //Delay to wait for sensors to load
@@ -224,39 +244,65 @@ void updateAccelData() {
   accel.z = event.orientation.z;
 }
 
+void updateBMPData() {
+  bmp.temp = bmpChip.readTemperature();
+  bmp.pressure = bmpChip.readPressure();
+  bmp.alt = bmpChip.readAltitude(1013.25); // this should be adjusted to your local forcase
+}
+
 /*
  * Updates sensor data 
  */
 void updateSensorData() {
   updateThermoTemp();
   updateAccelData();
+  updateBMPData();
 }
 
 void loop() {
 
   updateSensorData();
   
-
+  //Log thermo data
   String thermoLog = "[THERMO] C: ";
   thermoLog += thermo.temp;
   Serial.println(thermoLog);
+  
+  //Log bmp data
+  Serial.print("[BMP280] Temperature = ");
+  Serial.print(bmp.temp);
+  Serial.println(" *C");
 
+  Serial.print("[BMP280] Pressure = ");
+  Serial.print(bmp.pressure);
+  Serial.println(" Pa");
+
+  Serial.print("[BMP280] Approx altitude = ");
+  Serial.print(bmp.alt); // this should be adjusted to your local forcase
+  Serial.println(" m");
+
+  //Log accelerometer data
+  Serial.print("[ACCEL] ");
   Serial.print("X: ");
   Serial.print(accel.x, 4);
   Serial.print("\tY: ");
   Serial.print(accel.y, 4);
   Serial.print("\tZ: ");
   Serial.println(accel.z, 4);
-
+   
   // Here we create a single line to input into the log file
   String dataLog = "";
   dataLog += millis();        dataLog += ","; // Timestamp
   dataLog += thermo.temp;     dataLog += ","; // Thermocouple temperature
+  dataLog += bmp.temp;        dataLog += ","; // BMP temperature
+  dataLog += bmp.pressure;    dataLog += ","; // BMP pressure
+  dataLog += bmp.alt;         dataLog += ","; // BMP altitude
   dataLog += accel.x;         dataLog += ","; // Accelerometer x
   dataLog += accel.y;         dataLog += ","; // Accelerometer y
   dataLog += accel.z;       //dataLog += ","; // Accelerometer z
 
   Serial.println(dataLog);
+  Serial.println("");
   
   // Write the log to the log file
   // The log file is in CSV format for easy data analysis
