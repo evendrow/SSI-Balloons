@@ -18,7 +18,14 @@
 
 #include <IridiumSBD.h>
 
-#define SAMPLERATE_DELAY_MS (1000)
+#define SAMPLERATE_DELAY_MS (5000)
+#define TRANSMISSION_DELAY_MS (5*60*1000)
+#define CUTDOWN_DELAY_MS (2*60*1000)
+
+int NICHROME_PIN = 5;
+int nichromeCounter = 0;
+bool cutting = false;
+bool hasCut = false;
 
 //--------------------------------------
 // Define data structures for sensor data transfer
@@ -129,7 +136,10 @@ void readFileToConsole(String filename);
 
 void logDataToConsole();
 
-void checkSendRockblockMessage();
+void innerLoop();
+
+String getTransmissionString();
+bool checkSendRockblockMessage();
 void updateThermoTemp();
 void updateGPSData();
 void updateAccelData();
@@ -139,8 +149,15 @@ void updateSensorData();
 
 static void smartdelay(unsigned long ms);
 
+//Keep track of time elapsed; when exceeds transmission frequency, make transmission
+unsigned long transmissionTime = 0;
+
 void setup()
 {
+
+  pinMode(NICHROME_PIN, OUTPUT);
+  digitalWrite(NICHROME_PIN, LOW);
+  
   //Set IO pins
 //  SPI.setMOSI(11); //DO pin; connected to DI on the sd reader.
 //  SPI.setMISO(12); //DI pin; connected to DO on the sd reader.
@@ -152,7 +169,9 @@ void setup()
 
   // Open serial communications and wait for port to open:
   Serial.begin(9600);
-  while (!Serial) { delay(1); }
+
+  //UNCOMMENT THIS if working off computer; comment out if powering on battery
+//  while (!Serial) { delay(1); }
 
   // Start the serial port connected to the satellite modem
   IridiumSerial.begin(19200);
@@ -189,7 +208,7 @@ void setup()
   ss.begin(9600);
   
   //Delay to wait for sensors to load/stabilize
-  smartdelay(1000);
+  smartdelay(SAMPLERATE_DELAY_MS);
 
   //  writeLineToFile("test.txt", "This is a test line!");
   readFileToConsole("test.txt");
@@ -197,7 +216,26 @@ void setup()
 
 void loop() {
 
-  updateSensorData();
+  innerLoop();
+
+  //Send a message after time has elapsed
+  if (transmissionTime + TRANSMISSION_DELAY_MS < millis()) {
+    if (checkSendRockblockMessage()) {
+//      transmissionTime = 1000 * 1000;
+      transmissionTime = millis();
+    }
+//    transmissionTime = millis();
+    
+  } else {
+    Serial.print(millis() - transmissionTime);
+    Serial.println("ms since last transmission");
+  }
+
+  delay(1000);
+}
+
+void innerLoop() {
+    updateSensorData();
   logDataToConsole();
 //  checkSendRockblockMessage();
    
@@ -219,8 +257,8 @@ void loop() {
 
   // We use String(num, decimals) to force 5 decimal precision
   // According the the internet, 5 decimals gives 1.1132 m precision (very good)
-  dataLog += String(gps.latitude, 5);    dataLog += ","; // GPS latitude
-  dataLog += String(gps.longitude, 5);   dataLog += ","; // GPS longitude
+  dataLog += String(gps.latitude, 6);    dataLog += ","; // GPS latitude
+  dataLog += String(gps.longitude, 6);   dataLog += ","; // GPS longitude
   
   dataLog += gps.alt;         dataLog += ","; // Accelerometer z
   dataLog += gps.speed__kmph; //dataLog += ","; // Accelerometer z
@@ -230,7 +268,7 @@ void loop() {
   
   // Write the log to the log file
   // The log file is in CSV format for easy data analysis
-//   writeLineToFile("log.csv", dataLog);
+   writeLineToFile("log.csv", dataLog);
   
   // writeLineToFile("thermo.txt", thermoLog);
 
@@ -238,6 +276,21 @@ void loop() {
   // We use smartdelay() instead of delay() because we need to constantly
   // update the GPS library with info from the serial ports
   smartdelay(SAMPLERATE_DELAY_MS);
+
+  if (bmp.alt > 2000 && !hasCut && !cutting) {
+    digitalWrite(NICHROME_PIN, HIGH);
+    Serial.println("Started cutting...");
+
+    cutting = true;  
+    nichromeCounter = millis(); 
+  }
+
+  if (cutting && nichromeCounter + CUTDOWN_DELAY_MS < millis()) {
+    cutting = false;
+    digitalWrite(NICHROME_PIN, LOW);
+    Serial.println("Stopped cutting");
+    hasCut = true;
+  }
 
   // OLD: Since data collection and logging take time, the
   // OLD: actual sample rate will be higher
@@ -290,22 +343,36 @@ void logDataToConsole() {
   Serial.print("\t speed: ");
   Serial.println(gps.speed__kmph);
 
+  String message = getTransmissionString();
+
+  Serial.println(message);
+
+  char messageChar[50];
+  message.toCharArray(messageChar, 50);
+  
+  Serial.print(messageChar);
+
+}
+
+String getTransmissionString() {
   String message = "";
-  message += bmp.alt;         message += ","; // BMP altitude
-  message += bmp.temp;        message += ","; // BMP temperature
+  
+  message += String(bmp.temp, 1);        message += ","; // BMP temperature
+  message += String(bmp.pressure, 0);    message += ","; // BMP pressure
+  message += String(bmp.alt, 1);         message += ","; // BMP altitude
 
   // We use String(num, decimals) to force 5 decimal precision
   // According the the internet, 5 decimals gives 11.132 m precision (good)
   message += String(gps.latitude, 5);    message += ","; // GPS latitude
   message += String(gps.longitude, 5);   message += ","; // GPS longitude
   
-  message += gps.alt;         message += ","; // Accelerometer z
-  message += bmp.pressure;    //message += ","; // BMP pressure
+  message += String(gps.alt, 1);         //message += ","; // Accelerometer z
 
-  Serial.println(message);
+  return message;
 }
 
-void checkSendRockblockMessage() {
+bool checkSendRockblockMessage() {
+  Serial.println("Checking if can send message! ");
   int signalQuality = -1;
   
   // This returns a number between 0 and 5.
@@ -317,7 +384,7 @@ void checkSendRockblockMessage() {
     Serial.println(err);
 
     writeLineToFile("log.csv", "Signal Quality Check failed");
-    return;
+    return false;
   }
 
   Serial.print("On a scale of 0 to 5, signal quality is currently ");
@@ -326,24 +393,23 @@ void checkSendRockblockMessage() {
 
 
   if (signalQuality > 1) {
+    Serial.println("MAKING TRANSMISSION");
+    Serial.println("MAKING TRANSMISSION");
+    Serial.println("MAKING TRANSMISSION");
+    Serial.println("MAKING TRANSMISSION");
+    Serial.println("MAKING TRANSMISSION");
 
     //Altitude: altitude_barometer (m), internal_temperature, latitude, longitude, Altitude: altitude_gps (m), pressure
-    String message = "";
-    message += bmp.alt;         message += ","; // BMP altitude
-    message += bmp.temp;        message += ","; // BMP temperature
-
-    // We use String(num, decimals) to force 5 decimal precision
-    // According the the internet, 5 decimals gives 11.132 m precision (good)
-    message += String(gps.latitude, 5);    message += ","; // GPS latitude
-    message += String(gps.longitude, 5);   message += ","; // GPS longitude
     
-    message += gps.alt;         message += ","; // Accelerometer z
-    message += bmp.pressure;    //message += ","; // BMP pressure
-
-    Serial.print(message);
+    String message = getTransmissionString();
+    
+    char messageChar[50];
+    message.toCharArray(messageChar, 50);
+    
+    Serial.print(messageChar);
     
     Serial.print("[ROCKBLOCK] Trying to send the message.  This might take several minutes.\r\n");
-    err = modem.sendSBDText("Hello world!");
+    err = modem.sendSBDText(messageChar);
     if (err != ISBD_SUCCESS)
     {
       Serial.print("[ROCKBLOCK] sendSBDText failed: error ");
@@ -354,10 +420,13 @@ void checkSendRockblockMessage() {
   
     else {
       Serial.println("[ROCKBLOCK] Message send success");
+      return true;
     }
   } else {
     Serial.println("[ROCKBLOCK] Signal too weak to send");
   }
+
+  return false;
 }
 
 /*
